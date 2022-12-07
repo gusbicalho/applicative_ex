@@ -22,7 +22,7 @@ defmodule Applicative do
 
     {[
        quote generated: true do
-         {:ok, unquote(var)} <- unquote(Macro.escape(ok_form))
+         {:ok, unquote(var)} <- unquote(ok_form)
        end
      ], var}
   end
@@ -77,10 +77,27 @@ defmodule Applicative do
   end
 
   def test() do
+    a = {:ok, 4}
+    b = {:ok, 7}
+    c = {:ok, 8}
+
     applicative do
-      foo = ap!({:ok, 4})
-      bar = ap!({:ok, 7}) + ap!({:ok, 8})
+      foo = ap!(a)
+      bar = ap!(b) + ap!(c)
       foo + bar
     end
+    |> IO.inspect(label: "applicative")
+
+    # desugars to
+    with {:ok, fresh_1} <- a,
+         foo = fresh_1,
+         {:ok, fresh_2} <- b,
+         {:ok, fresh_3} <- c,
+         bar = fresh_2 + fresh_3 do
+      foo + bar
+    end
+    |> IO.inspect(label: "raw with")
+
+    nil
   end
 end
