@@ -1,0 +1,17 @@
+{
+    "files.exclude": {
+        "_build/**/*": true,
+        ".elixir_ls/**/*": true,
+        "deps/**/*": true,
+        "erl_crash.dump": true
+    },
+    "editor.formatOnSave": true,
+    "cSpell.words": [
+        "brujn",
+        "defcombinator",
+        "defparsec",
+        "desugared",
+        "escript",
+        "typedstruct"
+    ]
+}
