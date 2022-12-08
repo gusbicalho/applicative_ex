@@ -3,50 +3,87 @@ defmodule Applicative do
   Documentation for `Applicative`.
   """
 
-  defp desugar_statement(form, opts) do
-    {steps, desugared_form} = desugar_expression(form, opts)
-    steps ++ [desugared_form]
+  defmodule DesugaringState do
+    @enforce_keys [:next_temp_id]
+    defstruct [:next_temp_id]
   end
 
-  def desugar_expression({:=, _meta, [pattern, expression]}, opts) do
-    {steps, desugared_expression} = desugar_expression(expression, opts)
+  defp desugar_statement(form, %DesugaringState{} = state, opts) do
+    {new_state, steps, result_form} = desugar_expression(form, state, opts)
 
-    {steps,
+    if Enum.any?(steps, &match?({:<-, _, _}, &1)) do
+      {new_state, steps, result_form}
+    else
+      {state, [], form}
+    end
+  end
+
+  defp desugar_expression({:=, _meta, [pattern, expression]}, %DesugaringState{} = state, opts) do
+    {state, steps, desugared_expression} = desugar_expression(expression, state, opts)
+
+    {state, steps,
      quote do
        unquote(pattern) = unquote(desugared_expression)
      end}
   end
 
-  def desugar_expression({marker, _meta, [ok_form]}, %{marker: marker}) do
-    var = fresh()
+  defp desugar_expression({marker, _meta, [ok_form]}, %DesugaringState{} = state, %{
+         marker: marker,
+         temp_var_prefix: temp_var_prefix
+       }) do
+    {state, var} = temp(state, temp_var_prefix)
 
-    {[
-       quote generated: true do
+    {state,
+     [
+       quote do
          {:ok, unquote(var)} <- unquote(ok_form)
        end
      ], var}
   end
 
-  def desugar_expression({:fn, _, _} = lambda, _opts) do
-    {[], lambda}
+  defp desugar_expression({:fn, _, _} = lambda, state, _opts) do
+    {state, [], lambda}
   end
 
-  def desugar_expression({f, meta, [_ | _] = args}, opts) do
-    {many_steps, desugared_args} =
+  defp desugar_expression({:quote, _, _} = lambda, state, _opts) do
+    {state, [], lambda}
+  end
+
+  defp desugar_expression({f, meta, [_ | _] = args}, %DesugaringState{} = state, opts) do
+    {state, steps, desugared_args} =
       args
-      |> Enum.map(&desugar_expression(&1, opts))
-      |> Enum.unzip()
+      |> Enum.reduce({state, [], []}, fn arg_form,
+                                         {state, reverse_many_steps, reverse_desugared_args} ->
+        {state, steps, desugared_arg} = desugar_expression(arg_form, state, opts)
+        {state, [steps | reverse_many_steps], [desugared_arg | reverse_desugared_args]}
+      end)
+      |> then(fn {state, reverse_many_steps, reverse_desugared_args} ->
+        {state, Enum.concat(Enum.reverse(reverse_many_steps)),
+         Enum.reverse(reverse_desugared_args)}
+      end)
 
-    {Enum.concat(many_steps), {f, meta, desugared_args}}
+    {state, steps, {f, meta, desugared_args}}
   end
 
-  def desugar_expression(todo, _opts) do
-    {[], todo}
+  defp desugar_expression(other, state, %{temp_var_prefix: temp_var_prefix}) do
+    {state, var} = temp(state, temp_var_prefix)
+
+    {state,
+     [
+       quote do
+         unquote(var) = unquote(other)
+       end
+     ], var}
   end
 
-  def fresh(prefix \\ "fresh_") do
-    i = :erlang.unique_integer([:positive])
-    {String.to_atom("#{prefix}#{i}"), [], __MODULE__}
+  defp temp(%DesugaringState{} = state, prefix) do
+    i = state.next_temp_id
+    var = make_temp_var(prefix, i)
+    {put_in(state.next_temp_id, i + 1), var}
+  end
+
+  def make_temp_var(prefix, temp_id) do
+    {String.to_atom("#{prefix}#{temp_id}"), [], __MODULE__}
   end
 
   defp pop_last(list) do
@@ -56,24 +93,62 @@ defmodule Applicative do
     end
   end
 
-  defmacro applicative(opts \\ [], do: do_block) do
-    marker = Keyword.get(opts, :marker, :ap!)
+  def desugar_ok?(
+        form,
+        %{temp_var_prefix: temp_var_prefix, temp_var_id_init: temp_var_id_init, marker: marker}
+      ) do
+    init_desugaring_state = %DesugaringState{
+      next_temp_id: temp_var_id_init
+    }
 
     statements =
-      case do_block do
+      case form do
         {:__block__, _, statements} -> statements
         other_form -> [other_form]
       end
 
     statements
     |> Macro.expand(__ENV__)
-    |> Enum.flat_map(&desugar_statement(&1, %{marker: marker}))
+    |> Enum.scan({init_desugaring_state, nil, nil}, fn statement, {desugaring_state, _, _} ->
+      desugar_statement(statement, desugaring_state, %{
+        marker: marker,
+        temp_var_prefix: temp_var_prefix
+      })
+    end)
+    # |> Enum.flat_map(fn {_, steps, final_step} -> desugared_forms end)
     |> pop_last()
     |> case do
-      nil -> quote do: nil
-      {[], last_expr} -> last_expr
-      {steps, last_expr} -> {:with, [], steps ++ [[{:do, last_expr}]]}
+      nil ->
+        quote do: nil
+
+      {[], {_, [], final_result}} ->
+        final_result
+
+      {desugared_statements, {_, final_steps, final_result}} ->
+        steps =
+          Enum.flat_map(desugared_statements, fn
+            {_, steps, result} ->
+              result_step =
+                case result do
+                  {op, _, _} when op in [:<-, :=] -> result
+                  _other -> quote(do: _ = unquote(result))
+                end
+
+              steps ++ [result_step]
+          end) ++
+            final_steps
+
+        {:with, [], steps ++ [[{:do, final_result}]]}
     end
+  end
+
+  defmacro ok?(opts \\ [], do: do_block) do
+    desugar_ok?(do_block, %{
+      temp_var_prefix: Keyword.get(opts, :temp_var_prefix, "temp_"),
+      temp_var_id_init:
+        Keyword.get_lazy(opts, :temp_var_id_init, fn -> :erlang.unique_integer([:positive]) end),
+      marker: Keyword.get(opts, :marker, :ok!)
+    })
   end
 
   def test() do
@@ -81,23 +156,21 @@ defmodule Applicative do
     b = {:ok, 7}
     c = {:ok, 8}
 
-    applicative do
-      foo = ap!(a)
-      bar = ap!(b) + ap!(c)
-      foo + bar
-    end
-    |> IO.inspect(label: "applicative")
+    result =
+      ok? do
+        foo = ok!(a)
+        bar = ok!(b) + ok!(c)
+        foo + bar
+      end
 
     # desugars to
-    with {:ok, fresh_1} <- a,
-         foo = fresh_1,
-         {:ok, fresh_2} <- b,
-         {:ok, fresh_3} <- c,
-         bar = fresh_2 + fresh_3 do
-      foo + bar
-    end
-    |> IO.inspect(label: "raw with")
-
-    nil
+    ^result =
+      with {:ok, temp_1} <- a,
+           foo = temp_1,
+           {:ok, temp_2} <- b,
+           {:ok, temp_3} <- c,
+           bar = temp_2 + temp_3 do
+        foo + bar
+      end
   end
 end
