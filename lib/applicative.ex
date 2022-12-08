@@ -13,9 +13,12 @@ defmodule Applicative do
     {:=, meta, [pattern, desugared_expression]}
   end
 
-  defp desugar_expression({marker, _meta, [ok_form]}, %{marker: marker}) do
+  defp desugar_expression({marker, _meta, [expression]}, %{marker: marker} = opts) do
+    expression = Macro.expand(expression, opts.env)
+    desugared_expression = desugar_expression(expression, opts)
+
     quote do
-      case unquote(ok_form) do
+      case unquote(desugared_expression) do
         {:ok, unquote(temp_var())} -> unquote(temp_var())
         unquote(temp_var()) -> throw(%NotOk{value: unquote(temp_var())})
       end
@@ -30,12 +33,14 @@ defmodule Applicative do
     quote_form
   end
 
-  defp desugar_expression({f, meta, [_ | _] = args}, opts) do
-    {f, meta, Enum.map(args, &desugar_expression(&1, opts))}
-  end
+  defp desugar_expression(form, opts) do
+    case Macro.expand(form, opts.env) do
+      {f, meta, [_ | _] = args} ->
+        {f, meta, Enum.map(args, &desugar_expression(&1, opts))}
 
-  defp desugar_expression(other, _opts) do
-    other
+      other ->
+        other
+    end
   end
 
   defp temp_var() do
@@ -56,6 +61,7 @@ defmodule Applicative do
     %{file: file, line: line, module: module} = __CALLER__
 
     desugar_ok?(do_block, %{
+      env: __CALLER__,
       context: %{file: file, line: line, module: module},
       marker: Keyword.get(opts, :marker, :ok!)
     })

@@ -8,11 +8,12 @@ defmodule ApplicativeTest do
     a = {:ok, 4}
     b = {:ok, 7}
     c = {:ok, 8}
+    ok_tag = &{:ok, &1}
 
     assert 19 ==
              (ok? do
                 foo = ok!(a)
-                bar = ok!(b) + ok!(c)
+                bar = ok!(ok_tag.(ok!(b) + ok!(c)))
                 foo + bar
               end)
   end
